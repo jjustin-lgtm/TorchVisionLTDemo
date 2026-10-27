@@ -50,7 +50,8 @@ from torchvision.transforms.functional import to_tensor
 # ImageFolder sorts folder names alphabetically, so keep the same class order.
 CLASSES = ["hatchback","other","pickup", "sedan", "suv"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-PREPROCESS = models.ResNet18_Weights.DEFAULT.transforms()
+PREPROCESS = models.ResNet18_Weights.DEFAULT.transforms() # Creates a standard preprocessing pipeline
+# to help provide consistent images when training the model.
 
 
 
@@ -60,7 +61,7 @@ PREPROCESS = models.ResNet18_Weights.DEFAULT.transforms()
 # TorchVision provides a pretrained Mask R-CNN model trained off the
 # COCO dataset. this will be our general car identifier.
 # (maskrcnn_resnet50_fpn_v2 is the moedl name)
-
+# Create the ResNet-18 model.
 def make_classifier(pretrained=False):
     """Create ResNet-18 with four vehicle-category outputs."""
     weights = models.ResNet18_Weights.DEFAULT if pretrained else None
@@ -77,27 +78,44 @@ def make_classifier(pretrained=False):
 
 # Look at object detection pre-trained models
 
+# train function actually trains the ResNet-18 model with the
+# provided images from the folder parameter.
 def train(folder, epochs):
     """Fine-tune ResNet-18 and save its best-performing weights."""
+    
+    # Image augmentation, to edit each image so that they're consistant
+    # and can be properly used to train the model.
     augment = transforms.Compose([
-        transforms.RandomResizedCrop(224),
+        # By adding these two random transforms, we prevent the model from being "overtuned" to 
+        # very specific cases of vehicle orientation and direction.
+        transforms.RandomResizedCrop(224), 
         transforms.RandomHorizontalFlip(),
+        # Next convert the image to the single layer PyToch tensor.
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
+    
+    # Load the training and evaluation data into the program
     train_data = datasets.ImageFolder(f"{folder}/train", transform=augment)
     val_data = datasets.ImageFolder(f"{folder}/val", transform=PREPROCESS)
+    
     if train_data.classes != CLASSES or val_data.classes != CLASSES:
         raise ValueError(f"Both train/ and val/ must contain: {CLASSES}")
 
     print(f"Training on {len(train_data)} images; validating on {len(val_data)} images", flush=True)
     train_loader = DataLoader(train_data, batch_size=16, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=16)
+    
+    # Initalize the neural network
     model = make_classifier(pretrained=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss() # Loss function is used to measure the "reward/punishment" the nn gets if it incorrectly guesses a test.
+    
     best_accuracy = -1
 
+    # This is the actual training loop repeated for the number of epochs set.
+    # Works in 4 steps:
+    # Foward Pass, Calculate Loss, Backpropagation, and Optimizer step
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -109,6 +127,7 @@ def train(folder, epochs):
             optimizer.step()
             total_loss += loss.item() * len(labels)
 
+    # Then finally, evalulate the trained model using the validation dataset
         model.eval()
         correct = 0
         with torch.inference_mode():
@@ -117,6 +136,8 @@ def train(folder, epochs):
                 correct += (predictions == labels.to(DEVICE)).sum().item()
 
         accuracy = correct / len(val_data)
+        
+        # Print results of the training, and then save the trained model.
         print(f"Epoch {epoch + 1}/{epochs} | "
               f"loss: {total_loss / len(train_data):.3f} | "
               f"validation accuracy: {accuracy:.1%}", flush=True)
@@ -138,6 +159,8 @@ def train(folder, epochs):
 
 # Then use the ImageFolder class to load these folders and assign labels
 
+# Detect function is now the actual work of the model,
+# used to indetify the type of cars in the model.
 def detect(image_path, output, threshold):
     """Find vehicles with Mask R-CNN and label each one using ResNet-18."""
     model = make_classifier()
@@ -172,7 +195,8 @@ def detect(image_path, output, threshold):
         with torch.inference_mode():
             probabilities = model(PREPROCESS(crop).unsqueeze(0).to(DEVICE)).softmax(dim=1)[0]
         confidence, index = probabilities.max(dim=0)
-        text = f"{CLASSES[index.item()]} {confidence.item():.0%}"
+        count += 1
+        text = f"ID {count:03d} | {CLASSES[index.item()]} {confidence.item():.0%}"
 
         draw.rectangle((x1, y1, x2, y2), outline="lime", width=3)
         bounds = draw.textbbox((0, 0), text)
@@ -186,6 +210,7 @@ def detect(image_path, output, threshold):
 
     result.save(output)
     print(f"Saved {output} with {count} detected vehicles")
+
 
 
 if __name__ == "__main__":
